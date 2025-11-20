@@ -1,0 +1,227 @@
+version: '3.8'
+
+services:
+  # Zookeeper - Coordination service for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    hostname: zookeeper
+    container_name: webshield-zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - webshield-network
+
+  # Kafka - Message broker for log streaming
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    container_name: webshield-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+    networks:
+      - webshield-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "kafka:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # Kafka UI - Web interface for Kafka monitoring
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: webshield-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8888:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: webshield
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - webshield-network
+
+  # Fluentd - Log collector and forwarder
+  fluentd:
+    build:
+      context: ../fluentd
+      dockerfile: Dockerfile
+    container_name: webshield-fluentd
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "24224:24224"
+      - "24224:24224/udp"
+    volumes:
+      - ../fluentd/fluent.conf:/fluentd/etc/fluent.conf
+      - ../logs/nginx:/logs/nginx:ro
+    networks:
+      - webshield-network
+    environment:
+      - FLUENTD_CONF=fluent.conf
+
+  # Elasticsearch - Storage and indexing
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: webshield-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - bootstrap.memory_lock=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - webshield-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # Kibana - Visualization dashboard
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: webshield-kibana
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      XPACK_SECURITY_ENABLED: "false"
+    networks:
+      - webshield-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Spark Master - Processing engine coordinator
+  spark-master:
+    image: webshield-spark:latest
+    container_name: webshield-spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+    ports:
+      - "8080:8080"  # Spark Master Web UI
+      - "7077:7077"  # Spark Master Port
+    networks:
+      - webshield-network
+    volumes:
+      - ../spark:/opt/spark-apps
+
+  # Spark Worker - Processing engine executor
+  spark-worker:
+    image: webshield-spark:latest
+    container_name: webshield-spark-worker
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+    ports:
+      - "8081:8081"  # Spark Worker Web UI
+    networks:
+      - webshield-network
+    volumes:
+      - ../spark:/opt/spark-apps
+
+  # Spark Bot Detector - Continuous streaming job
+  spark-bot-detector:
+    image: webshield-spark:latest
+    container_name: webshield-spark-bot-detector
+    command: >
+      /opt/spark/bin/spark-submit
+      --master spark://spark-master:7077
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0
+      --conf spark.streaming.stopGracefullyOnShutdown=true
+      /opt/spark-apps/app/bot_detector.py
+    depends_on:
+      spark-master:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_SUBMIT_OPTS=-Dlog4j.configuration=file:///opt/spark/conf/log4j.properties
+    networks:
+      - webshield-network
+    volumes:
+      - ../spark:/opt/spark-apps
+      - spark-checkpoint:/tmp/webshield-checkpoint
+      - /tmp/spark-logs:/var/log/spark
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://spark-master:8080/api/v1/applications"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Log Generator - Continuous Nginx log generation
+  log-generator:
+    image: python:3.11-slim
+    container_name: webshield-log-generator
+    entrypoint: /bin/bash
+    command: /app/log-generator-entrypoint.sh
+    depends_on:
+      fluentd:
+        condition: service_started
+    volumes:
+      - ../:/app
+      - ../logs/nginx:/app/logs/nginx
+      - ../log-generator-entrypoint.sh:/app/log-generator-entrypoint.sh
+    networks:
+      - webshield-network
+    restart: on-failure
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "test", "-f", "/app/logs/nginx/access.log"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  webshield-network:
+    driver: bridge
+
+volumes:
+  elasticsearch-data:
+    driver: local
+  spark-checkpoint:
+    driver: local

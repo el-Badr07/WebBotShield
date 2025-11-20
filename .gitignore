@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Spark
+metastore_db/
+spark-warehouse/
+derby.log
+*.log
+spark/.checkpoints/
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment
+.env
+.venv
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/*.log
+logs/nginx/*.log
+logs/nginx/*.pos
+*.log.*
+
+# Elasticsearch data
+elasticsearch-data/
+
+# Spark checkpoints
+/tmp/webshield-checkpoint/
+
+# Fluentd buffers
+/var/log/fluentd-buffers/
+
+# Docker volumes
+docker/volumes/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+#docs
+PROJECT_SUMMARY.md
+ARCHITECTURE.md
+

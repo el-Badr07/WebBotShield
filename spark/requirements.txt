@@ -1,0 +1,21 @@
+# WebBotShield - Spark Application Dependencies
+
+# Core Spark
+pyspark==3.5.0
+
+# Kafka Integration
+kafka-python==2.0.2
+
+# Elasticsearch Integration
+elasticsearch==8.11.0
+
+# Data Processing
+# Python 3.8 compatible versions
+pandas==1.3.5
+numpy==1.21.6
+
+# Configuration
+pyyaml==6.0.1
+
+# Utilities
+python-dateutil==2.8.2

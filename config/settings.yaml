@@ -1,0 +1,111 @@
+# WebBotShield - Centralized Configuration
+
+# Kafka Configuration
+kafka:
+  bootstrap_servers: "kafka:29092"
+  topic: "nginx-logs"
+  group_id: "webshield-bot-detector"
+  auto_offset_reset: "latest"
+
+# Elasticsearch Configuration
+elasticsearch:
+  host: "elasticsearch"
+  port: 9200
+  logs_index: "webshield-logs"
+  detections_index: "webshield-detections"
+  bulk_size: 1000
+  timeout: 30
+
+# Bot Detection Thresholds
+detection:
+  # Request burst detection
+  burst_threshold: 100  # requests per minute to trigger burst alert
+  burst_window: "1 minute"
+
+  # Error ratio detection
+  error_ratio_threshold: 0.5  # 50% error rate to trigger alert
+  error_window: "5 minutes"
+
+  # Time windows for analysis
+  window_duration: "1 minute"
+  slide_duration: "30 seconds"
+  watermark_delay: "10 minutes"
+
+  # Bot scoring
+  bot_score_threshold: 0.7  # Threshold to classify as bot (0-1 scale)
+
+  # Scoring weights (must sum to 1.0)
+  weights:
+    burst: 0.4
+    error: 0.3
+    user_agent: 0.3
+
+# User-Agent Patterns
+user_agent:
+  # Known bot patterns (case-insensitive)
+  bot_patterns:
+    - "bot"
+    - "crawler"
+    - "spider"
+    - "scraper"
+    - "curl"
+    - "wget"
+    - "python-requests"
+    - "scrapy"
+    - "java"
+    - "go-http-client"
+    - "apache-httpclient"
+    - "libwww"
+    - "mechanize"
+    - "selenium"
+    - "phantom"
+
+  # Legitimate bots (optional whitelist)
+  whitelist:
+    - "googlebot"
+    - "bingbot"
+    - "slackbot"
+
+# Spark Configuration
+spark:
+  app_name: "WebBotShield-BotDetector"
+  checkpoint_location: "/tmp/webshield-checkpoint"
+  log_level: "WARN"
+
+  # Streaming configuration
+  streaming:
+    trigger_interval: "30 seconds"
+    max_offsets_per_trigger: 10000
+
+  # Performance tuning
+  executor:
+    memory: "2g"
+    cores: 2
+
+  driver:
+    memory: "1g"
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "[%(asctime)s] %(levelname)s - %(message)s"
+  output:
+    console: true
+    file: true
+    file_path: "logs/webshield.log"
+
+# Alerting Configuration (for future implementation)
+alerting:
+  enabled: false
+  channels:
+    - type: "console"
+    - type: "email"
+      recipients: []
+    - type: "slack"
+      webhook_url: ""
+
+# Development/Testing Configuration
+development:
+  sample_data: true
+  debug_mode: false
+  mock_kafka: false
