@@ -104,17 +104,14 @@ services:
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
-      - "ES_JAVA_OPTS=-Xms256m -Xmx256m"
-      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms128m -Xmx256m"
+      - bootstrap.memory_lock=false
+      - action.auto_create_index=+.watches.*,+.triggered_watches,-*
     deploy:
       resources:
         limits:
           cpus: '0.5'
-          memory: 512M
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
+          memory: 768M
     ports:
       - "9200:9200"
       - "9300:9300"
@@ -123,10 +120,11 @@ services:
     networks:
       - webshield-network
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
-      interval: 10s
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/ | grep -q cluster_name || exit 1"]
+      interval: 20s
       timeout: 10s
-      retries: 5
+      retries: 10
+      start_period: 45s
 
   # Kibana - Visualization dashboard
   kibana:
@@ -249,10 +247,12 @@ services:
     command: >
       /opt/spark/bin/spark-submit
       --master spark://spark-master:7077
-      --driver-memory 384m
-      --executor-memory 384m
+      --driver-memory 512m
+      --executor-memory 512m
       --conf spark.driver.maxResultSize=128m
       --conf spark.sql.shuffle.partitions=2
+      --conf spark.memory.fraction=0.6
+      --conf spark.memory.storageFraction=0.3
       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0
       --conf spark.streaming.stopGracefullyOnShutdown=true
       --conf spark.sql.execution.arrow.pyspark.enabled=true
@@ -270,8 +270,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
-          memory: 640M
+          cpus: '0.75'
+          memory: 1500M
     networks:
       - webshield-network
     volumes:
