@@ -94,14 +94,31 @@ class MLBotDetector:
         return default_config
 
     def _load_model(self):
-        """Load pre-trained scikit-learn model and scaler"""
+        """Load pre-trained scikit-learn or ONNX model and scaler"""
         try:
-            if os.path.exists(self.model_path):
+            # Try ONNX format first (environment-independent)
+            onnx_model_path = self.model_path.replace('.joblib', '.onnx')
+            if os.path.exists(onnx_model_path):
+                try:
+                    import onnx
+                    import onnxruntime as rt
+                    self.model = rt.InferenceSession(onnx_model_path)
+                    self.is_onnx = True
+                    print(f"✅ Loaded ONNX ML model from {onnx_model_path}")
+                except ImportError:
+                    print(f"⚠️ ONNX runtime not available, trying joblib format...")
+                    if os.path.exists(self.model_path):
+                        self.model = joblib.load(self.model_path)
+                        self.is_onnx = False
+                        print(f"✅ Loaded joblib ML model from {self.model_path}")
+            elif os.path.exists(self.model_path):
                 self.model = joblib.load(self.model_path)
-                print(f"✅ Loaded ML model from {self.model_path}")
+                self.is_onnx = False
+                print(f"✅ Loaded joblib ML model from {self.model_path}")
             else:
-                print(f"⚠️ Model not found at {self.model_path}. Using rule-based fallback.")
-                
+                print(f"⚠️ Model not found. Using rule-based fallback.")
+                self.model = None
+
             if os.path.exists(self.scaler_path):
                 self.scaler = joblib.load(self.scaler_path)
                 print(f"✅ Loaded scaler from {self.scaler_path}")
@@ -326,13 +343,28 @@ class MLBotDetector:
                         except:
                             pass
             
-            # Make predictions
+            # Make predictions (support both ONNX and joblib models)
             try:
-                if hasattr(model, 'predict_proba'):
+                if hasattr(model, 'run'):  # ONNX model
+                    # ONNX inference
+                    input_name = model.get_inputs()[0].name
+                    output_name = model.get_outputs()[0].name
+                    X_array = features_df.values.astype(np.float32)
+                    onnx_result = model.run([output_name], {input_name: X_array})
+                    probabilities = onnx_result[0].flatten()
+                    if probabilities.max() <= 1.0 and probabilities.min() >= 0.0:
+                        # Probabilities are already normalized
+                        pass
+                    else:
+                        # Need softmax or similar normalization
+                        probabilities = 1 / (1 + np.exp(-probabilities))
+                elif hasattr(model, 'predict_proba'):
+                    # scikit-learn model
                     probabilities = model.predict_proba(features_df)[:, 1]
                 else:
+                    # Fallback to predict
                     probabilities = model.predict(features_df).astype(float)
-                
+
                 predictions = (probabilities >= threshold).astype(int)
             except Exception as e:
                 print(f"Prediction error: {e}")

@@ -28,8 +28,11 @@ RUN pip install --no-cache-dir \
     elasticsearch==8.11.0 \
     scikit-learn==1.7.2 \
     joblib==1.3.2 \
-    pyarrow==14.0.1 \
-    shap==0.49.1
+    pyarrow==15.0.0 \
+    shap==0.49.1 \
+    onnx==1.15.0 \
+    onnxruntime==1.17.0 \
+    skl2onnx==1.16.0
 
 # Create spark user and directories
 RUN useradd -m -u 1000 spark || true
