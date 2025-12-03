@@ -10,9 +10,15 @@ kafka-python==2.0.2
 elasticsearch==8.11.0
 
 # Data Processing
-# Python 3.8 compatible versions
-pandas==1.3.5
-numpy==1.21.6
+pandas==2.0.3
+numpy==1.24.3
+
+# ML Model Loading
+scikit-learn==1.3.2
+joblib==1.3.2
+
+# Arrow for Pandas UDFs
+pyarrow==14.0.1
 
 # Configuration
 pyyaml==6.0.1

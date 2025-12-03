@@ -72,18 +72,51 @@ spark:
   checkpoint_location: "/tmp/webshield-checkpoint"
   log_level: "WARN"
 
-  # Streaming configuration
+  # Streaming configuration (reduced for low-resource servers)
   streaming:
-    trigger_interval: "30 seconds"
-    max_offsets_per_trigger: 10000
+    trigger_interval: "60 seconds"  # Increased from 30s
+    max_offsets_per_trigger: 1000   # Reduced from 10000
 
-  # Performance tuning
+  # Performance tuning (low-resource)
   executor:
-    memory: "2g"
-    cores: 2
+    memory: "256m"
+    cores: 1
 
   driver:
-    memory: "1g"
+    memory: "256m"
+
+# ML Model Configuration
+ml:
+  # Path to trained model (inside Docker container)
+  model_path: "/opt/spark-apps/models/webbotshield_bot_detector.joblib"
+  scaler_path: "/opt/spark-apps/models/scaler.joblib"
+  feature_names_path: "/opt/spark-apps/models/feature_names.txt"
+  
+  # Prediction settings
+  prediction_threshold: 0.5  # Probability threshold for bot classification
+  
+  # Feature engineering windows
+  window_duration: "60 seconds"
+  slide_duration: "30 seconds"
+  
+  # Feature list (must match training)
+  features:
+    - Port
+    - Request_Type
+    - Protocol
+    - Payload_Size
+    - requests_per_ip
+    - failure_rate_per_ip
+    - avg_payload_per_ip
+    - payload_std_per_ip
+    - time_since_last_request
+    - inter_arrival_std
+    - ua_is_empty
+    - ua_is_tool
+    - ua_is_browser
+    - is_encrypted
+    - is_failure
+    - protocol_error_rate
 
 # Logging Configuration
 logging:

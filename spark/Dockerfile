@@ -10,17 +10,21 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Install Python dependencies for ML
 RUN pip3 install --no-cache-dir \
-    pandas==1.3.5 \
-    numpy==1.21.6 \
+    pandas==2.0.3 \
+    numpy==1.24.3 \
     pyyaml==6.0.1 \
     python-dateutil==2.8.2 \
     kafka-python==2.0.2 \
-    elasticsearch==8.11.0
+    elasticsearch==8.11.0 \
+    scikit-learn==1.3.2 \
+    joblib==1.3.2 \
+    pyarrow==14.0.1
 
-# Create home directory for spark user if it doesn't exist
+# Create directories
 RUN mkdir -p /home/spark && chown -R spark:spark /home/spark
+RUN mkdir -p /opt/spark-apps/models && chown -R spark:spark /opt/spark-apps
 
 # Switch back to spark user
 USER spark

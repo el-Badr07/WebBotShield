@@ -115,8 +115,13 @@ class NginxLogGenerator:
         bytes_sent = random.randint(500, 50000)
         referer = random.choice(self.REFERERS)
         user_agent = random.choice(self.HUMAN_USER_AGENTS)
+        
+        # Protocol (always TCP for HTTP), Port (80 or 443), Request_Type (HTTP or HTTPS)
+        protocol = "TCP"
+        port = random.choice([80, 443])
+        request_type = "HTTPS" if port == 443 else "HTTP"
 
-        return f'{ip} - - [{ts}] "{method} {path} HTTP/1.1" {status} {bytes_sent} "{referer}" "{user_agent}"\n'
+        return f'{ip} - - [{ts}] "{method} {path} HTTP/1.1" {status} {bytes_sent} "{referer}" "{user_agent}" protocol={protocol} port={port} request_type={request_type}\n'
 
     def generate_bot_log(self, timestamp=None, burst=False):
         """Generate bot-like log entry"""
@@ -141,8 +146,13 @@ class NginxLogGenerator:
         bytes_sent = random.randint(200, 5000)
         referer = "-"
         user_agent = random.choice(self.BOT_USER_AGENTS)
+        
+        # Protocol (always TCP for HTTP), Port (80 or 443), Request_Type (HTTP or HTTPS)
+        protocol = "TCP"
+        port = random.choice([80, 443])
+        request_type = "HTTPS" if port == 443 else "HTTP"
 
-        return f'{ip} - - [{ts}] "{method} {path} HTTP/1.1" {status} {bytes_sent} "{referer}" "{user_agent}"\n'
+        return f'{ip} - - [{ts}] "{method} {path} HTTP/1.1" {status} {bytes_sent} "{referer}" "{user_agent}" protocol={protocol} port={port} request_type={request_type}\n'
 
     def generate_burst_attack(self, num_requests=150, timestamp=None):
         """Generate burst of requests from single IP (bot attack)"""
@@ -158,8 +168,13 @@ class NginxLogGenerator:
             status = random.choice([200, 404, 403, 429])
             bytes_sent = random.randint(100, 1000)
             user_agent = random.choice(self.BOT_USER_AGENTS)
+            
+            # Protocol (always TCP for HTTP), Port (80 or 443), Request_Type (HTTP or HTTPS)
+            protocol = "TCP"
+            port = random.choice([80, 443])
+            request_type = "HTTPS" if port == 443 else "HTTP"
 
-            log = f'{bot_ip} - - [{ts}] "{method} {path} HTTP/1.1" {status} {bytes_sent} "-" "{user_agent}"\n'
+            log = f'{bot_ip} - - [{ts}] "{method} {path} HTTP/1.1" {status} {bytes_sent} "-" "{user_agent}" protocol={protocol} port={port} request_type={request_type}\n'
             logs.append(log)
 
         return logs

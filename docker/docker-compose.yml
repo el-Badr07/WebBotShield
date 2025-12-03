@@ -11,6 +11,12 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_HEAP_OPTS: "-Xms128m -Xmx256m"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
     networks:
       - webshield-network
 
@@ -36,6 +42,12 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
       KAFKA_JMX_PORT: 9101
       KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
     networks:
       - webshield-network
     healthcheck:
@@ -57,6 +69,11 @@ services:
       KAFKA_CLUSTERS_0_NAME: webshield
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
     networks:
       - webshield-network
 
@@ -87,8 +104,13 @@ services:
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "ES_JAVA_OPTS=-Xms256m -Xmx256m"
       - bootstrap.memory_lock=true
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
     ulimits:
       memlock:
         soft: -1
@@ -118,6 +140,12 @@ services:
     environment:
       ELASTICSEARCH_HOSTS: http://elasticsearch:9200
       XPACK_SECURITY_ENABLED: "false"
+      NODE_OPTIONS: "--max-old-space-size=256"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
     networks:
       - webshield-network
     healthcheck:
@@ -133,6 +161,12 @@ services:
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
     environment:
       - SPARK_NO_DAEMONIZE=true
+      - SPARK_DAEMON_MEMORY=256m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 384M
     ports:
       - "8080:8080"  # Spark Master Web UI
       - "7077:7077"  # Spark Master Port
@@ -140,6 +174,7 @@ services:
       - webshield-network
     volumes:
       - ../spark:/opt/spark-apps
+      - ../notebook/models:/opt/spark-apps/models:ro
 
   # Spark Worker - Processing engine executor
   spark-worker:
@@ -150,22 +185,32 @@ services:
       - spark-master
     environment:
       - SPARK_NO_DAEMONIZE=true
-      - SPARK_WORKER_MEMORY=2G
-      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=512m
+      - SPARK_WORKER_CORES=1
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 768M
     ports:
       - "8081:8081"  # Spark Worker Web UI
     networks:
       - webshield-network
     volumes:
       - ../spark:/opt/spark-apps
+      - ../notebook/models:/opt/spark-apps/models:ro
 
-  # Spark Bot Detector - Continuous streaming job
+  # Spark Bot Detector - Rule-based streaming job
   spark-bot-detector:
     image: webshield-spark:latest
     container_name: webshield-spark-bot-detector
     command: >
       /opt/spark/bin/spark-submit
       --master spark://spark-master:7077
+      --driver-memory 256m
+      --executor-memory 256m
+      --conf spark.driver.maxResultSize=128m
+      --conf spark.sql.shuffle.partitions=2
       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0
       --conf spark.streaming.stopGracefullyOnShutdown=true
       /opt/spark-apps/app/bot_detector.py
@@ -179,6 +224,11 @@ services:
     environment:
       - SPARK_NO_DAEMONIZE=true
       - SPARK_SUBMIT_OPTS=-Dlog4j.configuration=file:///opt/spark/conf/log4j.properties
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
     networks:
       - webshield-network
     volumes:
@@ -186,6 +236,53 @@ services:
       - spark-checkpoint:/tmp/webshield-checkpoint
       - /tmp/spark-logs:/var/log/spark
     restart: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://spark-master:8080/api/v1/applications"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Spark ML Bot Detector - ML-based streaming job
+  spark-ml-bot-detector:
+    image: webshield-spark:latest
+    container_name: webshield-spark-ml-bot-detector
+    command: >
+      /opt/spark/bin/spark-submit
+      --master spark://spark-master:7077
+      --driver-memory 384m
+      --executor-memory 384m
+      --conf spark.driver.maxResultSize=128m
+      --conf spark.sql.shuffle.partitions=2
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0
+      --conf spark.streaming.stopGracefullyOnShutdown=true
+      --conf spark.sql.execution.arrow.pyspark.enabled=true
+      /opt/spark-apps/app/ml_bot_detector.py
+    depends_on:
+      spark-master:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_SUBMIT_OPTS=-Dlog4j.configuration=file:///opt/spark/conf/log4j.properties
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 640M
+    networks:
+      - webshield-network
+    volumes:
+      - ../spark:/opt/spark-apps
+      - ../notebook/models:/opt/spark-apps/models:ro
+      - ../config:/opt/spark-apps/config:ro
+      - spark-checkpoint-ml:/tmp/webshield-checkpoint-ml
+      - /tmp/spark-logs:/var/log/spark
+    restart: on-failure
+    profiles:
+      - ml  # Only start with: docker-compose --profile ml up
     healthcheck:
       test: ["CMD", "curl", "-f", "http://spark-master:8080/api/v1/applications"]
       interval: 30s
@@ -224,4 +321,6 @@ volumes:
   elasticsearch-data:
     driver: local
   spark-checkpoint:
+    driver: local
+  spark-checkpoint-ml:
     driver: local
