@@ -11,7 +11,7 @@ from pyspark.sql.functions import (
     col, window, count, sum as _sum, avg, stddev,
     from_json, to_timestamp, lit, when, udf,
     lower, concat_ws, current_timestamp, first,
-    pandas_udf, PandasUDFType
+    pandas_udf, PandasUDFType, coalesce, struct
 )
 from pyspark.sql.types import (
     StructType, StructField, StringType,
@@ -98,38 +98,58 @@ class MLBotDetector:
         try:
             # Try ONNX format first (environment-independent)
             onnx_model_path = self.model_path.replace('.joblib', '.onnx')
+            print(f"🔍 Looking for ONNX model at: {onnx_model_path}")
             if os.path.exists(onnx_model_path):
+                print(f"📄 ONNX model file found ({os.path.getsize(onnx_model_path)} bytes)")
                 try:
-                    import onnx
                     import onnxruntime as rt
-                    self.model = rt.InferenceSession(onnx_model_path)
+                    print(f"⏳ Loading ONNX model with ONNXRuntime...")
+                    self.model = rt.InferenceSession(onnx_model_path, providers=['CPUExecutionProvider'])
                     self.is_onnx = True
                     print(f"✅ Loaded ONNX ML model from {onnx_model_path}")
-                except ImportError:
-                    print(f"⚠️ ONNX runtime not available, trying joblib format...")
-                    if os.path.exists(self.model_path):
-                        self.model = joblib.load(self.model_path)
-                        self.is_onnx = False
-                        print(f"✅ Loaded joblib ML model from {self.model_path}")
-            elif os.path.exists(self.model_path):
-                self.model = joblib.load(self.model_path)
-                self.is_onnx = False
-                print(f"✅ Loaded joblib ML model from {self.model_path}")
+                    if os.path.exists(self.scaler_path):
+                        try:
+                            self.scaler = joblib.load(self.scaler_path)
+                            print(f"✅ Loaded scaler from {self.scaler_path}")
+                        except Exception as se:
+                            print(f"⚠️ Could not load scaler: {se}")
+                    return
+                except Exception as e:
+                    print(f"⚠️ ONNX loading failed: {type(e).__name__}: {e}")
+                    print(f"⚠️ Falling back to joblib format...")
+
+            # Fallback to joblib format (not recommended due to environment issues)
+            print(f"🔍 Looking for joblib model at: {self.model_path}")
+            if os.path.exists(self.model_path):
+                print(f"📄 Joblib model file found ({os.path.getsize(self.model_path)} bytes)")
+                try:
+                    print(f"⏳ Loading joblib model (may have compatibility issues)...")
+                    self.model = joblib.load(self.model_path)
+                    self.is_onnx = False
+                    print(f"✅ Loaded joblib ML model from {self.model_path}")
+                except Exception as e:
+                    print(f"❌ Error loading joblib model: {type(e).__name__}: {e}")
+                    self.model = None
             else:
+                print(f"⚠️ No model files found at {self.model_path} or {onnx_model_path}")
                 print(f"⚠️ Model not found. Using rule-based fallback.")
                 self.model = None
 
-            if os.path.exists(self.scaler_path):
-                self.scaler = joblib.load(self.scaler_path)
-                print(f"✅ Loaded scaler from {self.scaler_path}")
+            if self.model is not None and os.path.exists(self.scaler_path):
+                try:
+                    self.scaler = joblib.load(self.scaler_path)
+                    print(f"✅ Loaded scaler from {self.scaler_path}")
+                except Exception as e:
+                    print(f"⚠️ Could not load scaler: {e}")
         except Exception as e:
-            print(f"❌ Error loading model: {e}")
+            print(f"❌ Unexpected error loading model: {type(e).__name__}: {e}")
             self.model = None
 
     def _create_spark_session(self):
         """Create and configure Spark session"""
         return (SparkSession.builder
                 .appName("WebBotShield-MLBotDetector")
+                .master("local[*]")  # Use all available cores locally - no cluster needed
                 .config("spark.jars.packages",
                        "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,"
                        "org.elasticsearch:elasticsearch-spark-30_2.12:8.11.0")
@@ -295,153 +315,169 @@ class MLBotDetector:
 
     def predict_with_model(self, df):
         """Apply ML model predictions using Pandas UDF"""
-        
+
         model = self.model
         scaler = self.scaler
         feature_names = self.FEATURE_NAMES
         threshold = self.config['ml'].get('prediction_threshold', 0.5)
-        
+        # For ONNX models, pass the ONNX file path, not the joblib path
+        is_onnx = hasattr(model, 'run')  # Check if ONNX model
+        model_path = self.model_path.replace('.joblib', '.onnx') if is_onnx else self.model_path
+        scaler_path = self.scaler_path
+
         if model is None:
             # Fallback to rule-based detection
             return self._rule_based_detection(df)
-        
-        # Broadcast model for distributed prediction
-        model_broadcast = self.spark.sparkContext.broadcast(model)
-        scaler_broadcast = self.spark.sparkContext.broadcast(scaler)
-        
-        # Define prediction schema
-        prediction_schema = StructType([
-            StructField("bot_probability", DoubleType(), True),
-            StructField("is_bot", IntegerType(), True)
-        ])
-        
-        @pandas_udf(prediction_schema, PandasUDFType.GROUPED_MAP)
-        def predict_batch(pdf):
-            """Predict on a batch of data using the ML model"""
-            model = model_broadcast.value
-            scaler = scaler_broadcast.value
-            
-            if len(pdf) == 0:
-                return pd.DataFrame(columns=['bot_probability', 'is_bot'])
-            
-            # Prepare features in correct order
-            features_df = pd.DataFrame()
-            for feat in feature_names:
-                if feat in pdf.columns:
-                    features_df[feat] = pdf[feat].fillna(0)
-                else:
-                    features_df[feat] = 0
-            
-            # Scale numeric features if scaler available
-            numeric_cols = ['Payload_Size', 'avg_payload_per_ip', 'payload_std_per_ip',
-                           'time_since_last_request', 'inter_arrival_std']
-            if scaler is not None:
-                for col_name in numeric_cols:
-                    if col_name in features_df.columns:
-                        try:
-                            features_df[col_name] = scaler.transform(features_df[[col_name]])
-                        except:
-                            pass
-            
-            # Make predictions (support both ONNX and joblib models)
+
+        # Broadcast necessary data for distributed prediction
+        # For ONNX models, broadcast paths instead of the model object (can't pickle ONNX InferenceSession)
+        # For joblib models, broadcast the model itself
+        if is_onnx:
+            model_path_broadcast = self.spark.sparkContext.broadcast(model_path)
+            scaler_path_broadcast = self.spark.sparkContext.broadcast(scaler_path)
+            scaler_broadcast = self.spark.sparkContext.broadcast(scaler)
+            is_onnx_broadcast = self.spark.sparkContext.broadcast(True)
+        else:
+            model_broadcast = self.spark.sparkContext.broadcast(model)
+            scaler_broadcast = self.spark.sparkContext.broadcast(scaler)
+            is_onnx_broadcast = self.spark.sparkContext.broadcast(False)
+            model_path_broadcast = None
+            scaler_path_broadcast = None
+
+        # Use mapInPandas for distributed prediction
+        return self._apply_model_predictions(df, model_broadcast if not is_onnx else None,
+                                           model_path_broadcast if is_onnx else None,
+                                           scaler_path_broadcast if is_onnx else None,
+                                           scaler_broadcast, is_onnx_broadcast, threshold)
+
+    def _apply_model_predictions(self, df, model_broadcast, model_path_broadcast,
+                                scaler_path_broadcast, scaler_broadcast, is_onnx_broadcast, threshold):
+        """Apply model predictions using foreachBatch for streaming"""
+
+        # Add placeholder columns for schema resolution
+        # Use explicit float type for bot_probability to ensure ES maps it correctly
+        df = df.withColumn("bot_probability", lit(0.5).cast(DoubleType()))
+        df = df.withColumn("is_bot", lit(0).cast(IntegerType()))
+        df = df.withColumn("prediction_method", lit("ml_model"))
+
+        # Define the foreachBatch function for actual ML predictions
+        def apply_ml_predictions_batch(batch_df, batch_id):
+            """Apply ML model predictions to each micro-batch"""
+            if batch_df.rdd.isEmpty():
+                return
+
+            batch_df.persist()  # Avoid recomputation
+
             try:
-                if hasattr(model, 'run'):  # ONNX model
-                    # ONNX inference
+                is_onnx = is_onnx_broadcast.value
+                scaler = scaler_broadcast.value
+
+                # Convert to pandas for batch processing
+                pdf = batch_df.toPandas()
+
+                # Prepare features
+                features_df = pd.DataFrame()
+                for feat in self.FEATURE_NAMES:
+                    if feat in pdf.columns:
+                        features_df[feat] = pdf[feat].fillna(0).astype(float)
+                    else:
+                        features_df[feat] = 0.0
+
+                # Debug: show feature stats before scaling
+                sample_row = features_df.iloc[0] if len(features_df) > 0 else None
+                if sample_row is not None and batch_id % 50 == 0:  # Every 50 batches
+                    print(f"DEBUG Batch {batch_id}: Sample features: {dict(sample_row[:5])}")
+
+                # Scale numeric features
+                numeric_cols = ['Payload_Size', 'avg_payload_per_ip', 'payload_std_per_ip',
+                               'time_since_last_request', 'inter_arrival_std']
+                if scaler is not None:
+                    # Scale all numeric columns at once to match scaler's fit
+                    try:
+                        cols_to_scale = [col for col in numeric_cols if col in features_df.columns]
+                        if cols_to_scale:
+                            scaled_values = scaler.transform(features_df[cols_to_scale])
+                            features_df[cols_to_scale] = pd.DataFrame(scaled_values, columns=cols_to_scale, index=features_df.index)
+                    except Exception as e:
+                        print(f"⚠️ Scaling error: {e}")
+                else:
+                    print(f"⚠️ WARNING: Scaler is None in batch {batch_id}")
+
+                # Load model on executor and predict
+                if is_onnx:
+                    import onnxruntime as rt
+                    model_path = model_path_broadcast.value
+                    model = rt.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+
                     input_name = model.get_inputs()[0].name
                     output_name = model.get_outputs()[0].name
                     X_array = features_df.values.astype(np.float32)
                     onnx_result = model.run([output_name], {input_name: X_array})
                     probabilities = onnx_result[0].flatten()
-                    if probabilities.max() <= 1.0 and probabilities.min() >= 0.0:
-                        # Probabilities are already normalized
-                        pass
-                    else:
-                        # Need softmax or similar normalization
+
+                    # Normalize if needed
+                    if not (probabilities.max() <= 1.0 and probabilities.min() >= 0.0):
                         probabilities = 1 / (1 + np.exp(-probabilities))
-                elif hasattr(model, 'predict_proba'):
-                    # scikit-learn model
-                    probabilities = model.predict_proba(features_df)[:, 1]
+
+                    # Debug: show prediction stats
+                    prob_min, prob_max, prob_mean = probabilities.min(), probabilities.max(), probabilities.mean()
+                    print(f"✅ Batch {batch_id}: Applied ONNX predictions ({len(pdf)} rows) | "
+                          f"Probs: min={prob_min:.4f}, max={prob_max:.4f}, mean={prob_mean:.4f}")
                 else:
-                    # Fallback to predict
-                    probabilities = model.predict(features_df).astype(float)
-
-                predictions = (probabilities >= threshold).astype(int)
-            except Exception as e:
-                print(f"Prediction error: {e}")
-                probabilities = np.zeros(len(pdf))
-                predictions = np.zeros(len(pdf), dtype=int)
-            
-            result = pd.DataFrame({
-                'bot_probability': probabilities,
-                'is_bot': predictions
-            })
-            
-            return result
-        
-        # Apply prediction - need to use foreachBatch for model inference
-        # Since pandas_udf with GROUPED_MAP requires groupBy, we'll use a different approach
-        
-        # Alternative: Use mapInPandas for streaming
-        return self._apply_model_predictions(df, model_broadcast, scaler_broadcast, threshold)
-
-    def _apply_model_predictions(self, df, model_broadcast, scaler_broadcast, threshold):
-        """Apply model predictions using mapInPandas"""
-        
-        feature_names = self.FEATURE_NAMES
-        
-        def predict_partition(iterator):
-            """Predict on each partition"""
-            model = model_broadcast.value
-            scaler = scaler_broadcast.value
-            
-            for pdf in iterator:
-                if len(pdf) == 0:
-                    yield pdf
-                    continue
-                
-                # Prepare features
-                features_df = pd.DataFrame()
-                for feat in feature_names:
-                    if feat in pdf.columns:
-                        features_df[feat] = pdf[feat].fillna(0).astype(float)
-                    else:
-                        features_df[feat] = 0.0
-                
-                # Scale numeric features
-                numeric_cols = ['Payload_Size', 'avg_payload_per_ip', 'payload_std_per_ip',
-                               'time_since_last_request', 'inter_arrival_std']
-                if scaler is not None:
-                    for col_name in numeric_cols:
-                        if col_name in features_df.columns:
-                            try:
-                                values = features_df[[col_name]].values
-                                features_df[col_name] = scaler.transform(values).flatten()
-                            except:
-                                pass
-                
-                # Predict
-                try:
+                    model = model_broadcast.value
                     if hasattr(model, 'predict_proba'):
                         probabilities = model.predict_proba(features_df.values)[:, 1]
                     else:
                         probabilities = model.predict(features_df.values).astype(float)
-                    
-                    predictions = (probabilities >= threshold).astype(int)
-                except Exception as e:
-                    print(f"Prediction error: {e}")
-                    probabilities = np.zeros(len(pdf))
-                    predictions = np.zeros(len(pdf), dtype=int)
-                
-                pdf['bot_probability'] = probabilities
+
+                    print(f"✅ Batch {batch_id}: Applied Joblib predictions ({len(pdf)} rows)")
+
+                # Create prediction results
+                predictions = (probabilities >= threshold).astype(int)
+                # Ensure probabilities are stored as float64
+                pdf['bot_probability'] = probabilities.astype(np.float64)
                 pdf['is_bot'] = predictions
                 pdf['prediction_method'] = 'ml_model'
-                
-                yield pdf
-        
-        # Get output schema
-        output_schema = df.schema.add("bot_probability", DoubleType()).add("is_bot", IntegerType()).add("prediction_method", StringType())
-        
-        return df.mapInPandas(predict_partition, output_schema)
+                # Generate unique detection ID based on index (Elasticsearch can auto-generate IDs, but we'll create them)
+                pdf['detection_id'] = pdf.index.astype(str)
+
+                # Debug: verify probabilities are set correctly
+                if batch_id % 100 == 0:
+                    print(f"DEBUG: Sample probs in pdf: {pdf['bot_probability'].iloc[:3].tolist()}")
+
+                # Convert back to Spark DataFrame with explicit schema for bot_probability
+                from pyspark.sql.types import StructField
+
+                # Get schema from pandas DF
+                result_df = self.spark.createDataFrame(pdf)
+                # Explicitly cast bot_probability to double to ensure it's stored as float
+                result_df = result_df.withColumn("bot_probability", col("bot_probability").cast(DoubleType()))
+
+                # Write to Elasticsearch
+                result_df.write \
+                    .format("org.elasticsearch.spark.sql") \
+                    .option("es.nodes", self.config['elasticsearch']['host']) \
+                    .option("es.port", str(self.config['elasticsearch']['port'])) \
+                    .option("es.mapping.id", "detection_id") \
+                    .mode("append") \
+                    .save(f"{self.config['elasticsearch'].get('index_prefix', 'webshield')}-detections")
+
+                print(f"✅ Batch {batch_id}: Written {len(pdf)} predictions to Elasticsearch")
+
+            except Exception as e:
+                print(f"❌ Error applying ML predictions in batch {batch_id}: {type(e).__name__}: {e}")
+            finally:
+                batch_df.unpersist()
+
+        # Start the foreachBatch sink for ML predictions
+        ml_query = df.writeStream \
+            .foreachBatch(apply_ml_predictions_batch) \
+            .option("checkpointLocation", f"{self.config['checkpoint']['location']}/ml_predictions") \
+            .start()
+
+        print("📊 ML prediction sink started successfully")
+
+        return df
 
     def _rule_based_detection(self, df):
         """Fallback rule-based detection when model is not available"""
@@ -513,8 +549,8 @@ class MLBotDetector:
 
     def write_to_console(self, df):
         """Write streaming results to console for debugging"""
-        
-        # Select relevant columns for display
+
+        # Ensure all required columns exist with default values if missing
         display_df = df.select(
             col("window.start").alias("window_start"),
             col("window.end").alias("window_end"),
@@ -523,13 +559,13 @@ class MLBotDetector:
             "failure_rate_per_ip",
             "ua_is_tool",
             "ua_is_browser",
-            "bot_probability",
-            "is_bot",
-            "classification",
-            "prediction_method",
-            "detection_reasons"
+            coalesce(col("bot_probability"), lit(0.0)).alias("bot_probability"),
+            coalesce(col("is_bot"), lit(0)).alias("is_bot"),
+            coalesce(col("classification"), lit("Unknown")).alias("classification"),
+            coalesce(col("prediction_method"), lit("unknown")).alias("prediction_method"),
+            coalesce(col("detection_reasons"), lit("")).alias("detection_reasons")
         )
-        
+
         query = (display_df
                  .writeStream
                  .outputMode("update")
@@ -598,27 +634,26 @@ class MLBotDetector:
         print("📈 Computing aggregated features...")
         aggregated = self.compute_aggregated_features(enriched_logs)
 
-        # Apply ML predictions
-        print("🧠 Applying ML model predictions...")
+        # Apply ML predictions (handled via foreachBatch sink)
+        print("🧠 Applying ML model predictions via foreachBatch...")
         predictions = self.predict_with_model(aggregated)
-
-        # Enrich with metadata
-        print("📝 Enriching detections...")
-        enriched = self.enrich_detections(predictions)
-
-        # Filter bot detections for alerts
-        bot_alerts = enriched.filter(col("is_bot") == 1)
-
-        # Write all detections to console
-        console_query = self.write_to_console(enriched)
 
         print("\n" + "=" * 80)
         print("✅ ML Bot detection pipeline started successfully!")
         print("🔍 Monitoring for suspicious traffic patterns...")
+        print("📊 Predictions written to Elasticsearch")
         print("=" * 80 + "\n")
 
-        # Wait for termination
-        console_query.awaitTermination()
+        # Wait for ML prediction stream to complete
+        # The foreachBatch sink is started inside predict_with_model()
+        # So we need to keep the driver alive
+        try:
+            import time
+            while True:
+                time.sleep(10)
+        except KeyboardInterrupt:
+            print("\n✅ Shutting down gracefully...")
+            self.spark.stop()
 
 
 def main():
